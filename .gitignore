@@ -8,3 +8,9 @@ Desktop.ini
 # Local only
 *.log
 _tmp/
+dist/
+
+# Large duplicate exports (keep workshop-package/thumbnail.png + header.jpg)
+assets/
+workshop-package/header.png
+workshop-package/thumbnail.jpg
