@@ -1,0 +1,14 @@
+﻿# Workshop package
+
+This folder is ready for Palworld Mod Uploader.
+
+## Upload steps
+1. Install/launch **Palworld Mod Uploader** from your Steam library (ships with Palworld ownership).
+2. Set Workshop Content Directory to:
+   `C:\Program Files (x86)\Steam\steamapps\workshop\content\1623730`
+3. Click **Create New Mod** and enable **Lua** + **LogicMods** (creates a Steam item as Hidden).
+4. Copy everything from this `workshop-package` folder into the new workshop item folder (overwrite Info.json, thumbnail, Scripts, LogicMods).
+5. In Mod Uploader: Save Info.json if needed, then **Upload To Steam**.
+6. On the Workshop page: paste WORKSHOP_DESCRIPTION.txt, set visibility to Public when ready.
+
+Do not edit `.workshop.json` by hand.

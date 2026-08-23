@@ -1,0 +1,10 @@
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Local only
+*.log
+_tmp/

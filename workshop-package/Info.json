@@ -1,0 +1,30 @@
+﻿{
+    "Thumbnail":  "thumbnail.png",
+    "Author":  "Carde",
+    "Version":  "1.0.0",
+    "DebugMode":  false,
+    "Tags":  [
+                 "UE4SS",
+                 "Gameplay"
+             ],
+    "PackageName":  "BloodSplatterBoth",
+    "Dependencies":  [
+                         "UE4SSExperimentalPW"
+                     ],
+    "MinRevision":  82182,
+    "InstallRule":  [
+                        {
+                            "Targets":  [
+                                            "./Scripts"
+                                        ],
+                            "Type":  "Lua"
+                        },
+                        {
+                            "Targets":  [
+                                            "./LogicMods/"
+                                        ],
+                            "Type":  "LogicMods"
+                        }
+                    ],
+    "ModName":  "Blood Splatter (Humans + Pals)"
+}

@@ -1,0 +1,17 @@
+﻿Blood splatter for human NPCs and Pals.
+
+Effects
+- Hit blood spray + ground/wall decals
+- Death blood pools
+- Headshot decapitation for human NPCs only (not pals)
+
+Requirements
+- UE4SS Experimental (Palworld) workshop dependency (UE4SSExperimentalPW)
+
+Important
+- Do NOT use together with the original Blood Splatter mod (petyr1710). Unsubscribe/disable the original to avoid double FX/crashes.
+- Client-side visuals only. Mature/gore content.
+
+Credits
+- Based on Blood Splatter by petyr1710
+- VFX: Realistic Blood VFX by Hivemind (Fab)
