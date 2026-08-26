@@ -252,7 +252,8 @@ end
 local SPATTER = {
     Enabled       = true,
 
-    Count         = 6,
+    -- 1.0.2 stability: fewer FX under combat spam (UE4SS native AVs).
+    Count         = 2,
 
     GroundOnly    = true,
 
@@ -260,11 +261,11 @@ local SPATTER = {
 
     GroundDepth   = 60.0,
 
-    WallDecals    = true,
+    WallDecals    = false,
 
-    WallOnlyOnHeadshot = false,
+    WallOnlyOnHeadshot = true,
 
-    WallViaBP = true,
+    WallViaBP = false,
 
     WallCount     = 1,
     WallRange     = 400.0,
@@ -277,21 +278,22 @@ local SPATTER = {
 
     SpreadInterval = 0.0,
 
-    MinIntervalPerActor = 0.5,
+    MinIntervalPerActor = 0.85,
+    MinIntervalPerPal = 1.35,
 
-    HeadshotBypassThrottle = true,
+    HeadshotBypassThrottle = false,
     ConeDegrees   = 35.0,
     StartOffset   = 10.0,
 
     RangeMin      = 30.0,
-    RangeMax      = 260.0,
+    RangeMax      = 220.0,
     FallHeight    = 250.0,
 
     SizeMin       = 30.0,
-    SizeMax       = 96.0,
+    SizeMax       = 80.0,
     Depth         = 16.0,
 
-    LifeSpan      = 150.0,
+    LifeSpan      = 120.0,
 
     FadeScreenSize = 0.005,
 
@@ -306,17 +308,19 @@ local SPATTER = {
     DelayMin      = 0.05,
     DelayMax      = 0.25,
 
-    AttachToBone  = true,
+    AttachToBone  = false,
 
     FxPooling     = 1,
 
-    ImpactFxInterval = 0.05,
+    ImpactFxInterval = 0.25,
 
     FixedImpactBone = "spine_02",
 
     ImpactFxTowardAttacker = false,
 
     ForwardRatio  = 0.5,
+
+    GlobalMaxPerSecond = 8,
 }
 
 local IMPACT_BONES = {
@@ -792,7 +796,8 @@ local function spawnFxAttached(asset, mesh, boneName, location, rotation, locati
 end
 
 local SHADER_WARMUP = {
-    Enabled       = true,
+    -- 1.0.2: disabled (map-load FX warmup contributed to instability).
+    Enabled       = false,
     DelayAfterLoad = 6.0,
     RetryInterval = 3.0,
     MaxAttempts   = 10,
@@ -1137,6 +1142,8 @@ local spatterTimeByActor = {}
 
 local impactFxTimeByActor = {}
 local spatterActorCount = 0
+local globalSpatterWindowStart = 0.0
+local globalSpatterWindowCount = 0
 
 local function resolveDecalRoll(material)
     local roll = 0.0
@@ -1636,14 +1643,17 @@ local function scheduleWarmupAttempt(attempt)
     end)
 end
 
-local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKill)
+local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKill, isPal)
     if not SPATTER.Enabled then
         return
     end
 
     EnsurePumpAlive()
 
-    if not defender or not defender:IsValid() then
+    local okValid, isValid = pcall(function()
+        return defender and defender:IsValid()
+    end)
+    if not okValid or not isValid then
         return
     end
 
@@ -1658,10 +1668,26 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
 
         local now = gameTimeSeconds(defender)
 
+        -- Global combat spam cap (native AVs rise when every pal hit spawns FX).
+        if now - globalSpatterWindowStart >= 1.0 then
+            globalSpatterWindowStart = now
+            globalSpatterWindowCount = 0
+        end
+        local maxPerSec = SPATTER.GlobalMaxPerSecond or 8
+        if globalSpatterWindowCount >= maxPerSec then
+            return
+        end
+        globalSpatterWindowCount = globalSpatterWindowCount + 1
+
+        local minInterval = SPATTER.MinIntervalPerActor or 0.85
+        if isPal and SPATTER.MinIntervalPerPal then
+            minInterval = SPATTER.MinIntervalPerPal
+        end
+
         local last = spatterTimeByActor[key]
         if last ~= nil then
             if now >= last then
-                if (now - last) < SPATTER.MinIntervalPerActor then
+                if (now - last) < minInterval then
                     throttled = true
                 end
             end
@@ -2004,13 +2030,14 @@ local BLOOD_POOL = {
 
     Enabled     = true,
 
-    Delay       = 0.0,
+    Delay       = 0.2,
     HeightAbove = 40.0,
     Bone        = "pelvis",
 
     MarkDecapitation = false,
 
-    AttachToCorpse = true,
+    -- 1.0.2: attaching pools to ragdolls/corpses can AV in UE4SS.
+    AttachToCorpse = false,
 
     RandomMaterial = false,
     Materials = {
@@ -2838,34 +2865,63 @@ local function handleDamageReact(
     end
 
     local defender = damageResult.Defender
+    local okDef, defValid = pcall(function()
+        return defender and defender:IsValid()
+    end)
+    if not okDef or not defValid then
+        return
+    end
 
     if not isBloodEligible(defender) then
         return
     end
 
     local human = isHumanNPC(defender)
+    local isPal = (not human) and isPalCreature(defender)
     local isDead = unwrap(IsDeadParameter) == true
-    local isPartsBroke = unwrap(IsPartsBrokeParameter) == true
-    local deadInfo = unwrap(DeadInfoParameter)
     local isWeak = tonumber(tostring(damageResult.BodyPartsType)) == 0
+    local hitLocation = nil
+    pcall(function()
+        hitLocation = damageResult.HitLocation
+    end)
 
     -- Headshot decapitation is human-NPC only (pal skeletons differ per species).
     local isHeadshotKill = human and isDead and isWeak
     if isHeadshotKill then
-        triggerHeadGoreEffect(defender, damageResult.HitLocation)
+        local okGore, goreErr = pcall(function()
+            triggerHeadGoreEffect(defender, hitLocation)
+        end)
+        if not okGore then
+            log(string.format("HEAD GORE SKIP: %s", tostring(goreErr)))
+        end
     end
 
-    denyDecalsOnMesh(defender)
+    -- SetReceivesDecals on every pal hit is expensive; humans only is enough.
+    if human then
+        denyDecalsOnMesh(defender)
+    end
 
-    triggerBloodSpatter(defender, damageResult.Attacker, damageResult.HitLocation,
-        isHeadshotKill)
+    local okSpatter, spatterErr = pcall(function()
+        triggerBloodSpatter(defender, damageResult.Attacker, hitLocation,
+            isHeadshotKill, isPal)
+    end)
+    if not okSpatter then
+        log(string.format("SPATTER SKIP: %s", tostring(spatterErr)))
+    end
 
     if isDead then
-        spawnBloodPool(defender, isHeadshotKill)
+        local okPool, poolErr = pcall(function()
+            spawnBloodPool(defender, isHeadshotKill)
+        end)
+        if not okPool then
+            log(string.format("POOL SKIP: %s", tostring(poolErr)))
+        end
     end
 
     if isHeadshotKill then
-        spawnNeckGroundDecal(defender, damageResult.Attacker)
+        pcall(function()
+            spawnNeckGroundDecal(defender, damageResult.Attacker)
+        end)
     end
 
 end
@@ -2958,6 +3014,7 @@ end
 StartPumpLoop()
 
 log("Loaded. Blood for human NPCs + pals. Decapitation: humans only.")
+log("Stability 1.0.2: reduced combat FX rate (walls off, pools unattached, harder throttles).")
 log("Press Ctrl+F8 to scan loaded characters / class ancestry.")
-log("Blood spatter is active (backward toward the attacker, sticks to walls and floors).")
+log("Blood spatter is active (backward toward the attacker, sticks to floors).")
 log("Do NOT load this alongside the original Blood Splatter mod.")
