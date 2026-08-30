@@ -2,7 +2,7 @@
 
 Effects
 - Humans: hit blood spray + ground decals, death pools, headshot decapitation
-- Pals: death blood (pool + death spray); no per-hit FX (stability)
+- Pals: hit blood (throttled) + death pools
 - Player: no blood FX
 
 Requirements
@@ -11,7 +11,7 @@ Requirements
 Important
 - Do NOT use together with the original Blood Splatter mod (petyr1710). Unsubscribe/disable the original to avoid double FX/crashes.
 - Client-side visuals only. Mature/gore content.
-- v1.0.3: combat stability hotfix (FX deferred off damage hook; pals death-only)
+- v1.0.4: combat FX deferred off the damage hook (stability) with hit spray restored
 
 Credits
 - Based on Blood Splatter by petyr1710

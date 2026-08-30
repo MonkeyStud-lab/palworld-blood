@@ -252,14 +252,12 @@ end
 local SPATTER = {
     Enabled       = true,
 
-    -- 1.0.3 stability: defer FX off native hooks; pals death-only; no hit Niagara.
-    Count         = 1,
+    -- 1.0.4: FX still deferred off the damage hook; visuals restored with throttles.
+    Count         = 2,
 
-    -- Hit spray on pals is the main combat spam / AV source. Death pools still run.
-    PalHitSpatter = false,
+    PalHitSpatter = true,
 
-    -- Niagara spawn-at-hit inside combat is a common UE4SS AV vector.
-    ImpactFxEnabled = false,
+    ImpactFxEnabled = true,
 
     GroundOnly    = true,
 
@@ -284,8 +282,8 @@ local SPATTER = {
 
     SpreadInterval = 0.0,
 
-    MinIntervalPerActor = 1.0,
-    MinIntervalPerPal = 1.5,
+    MinIntervalPerActor = 0.85,
+    MinIntervalPerPal = 1.2,
 
     HeadshotBypassThrottle = false,
     ConeDegrees   = 35.0,
@@ -296,7 +294,7 @@ local SPATTER = {
     FallHeight    = 250.0,
 
     SizeMin       = 30.0,
-    SizeMax      = 80.0,
+    SizeMax       = 80.0,
     Depth         = 16.0,
 
     LifeSpan      = 120.0,
@@ -318,7 +316,7 @@ local SPATTER = {
 
     FxPooling     = 1,
 
-    ImpactFxInterval = 0.35,
+    ImpactFxInterval = 0.3,
 
     FixedImpactBone = "spine_02",
 
@@ -326,7 +324,7 @@ local SPATTER = {
 
     ForwardRatio  = 0.5,
 
-    GlobalMaxPerSecond = 4,
+    GlobalMaxPerSecond = 8,
 }
 
 local IMPACT_BONES = {
@@ -482,6 +480,13 @@ local function runOnGameThread(callback)
     end)
 end
 
+local function stillValid(object)
+    local ok, valid = pcall(function()
+        return object ~= nil and object:IsValid()
+    end)
+    return ok and valid
+end
+
 local function objectSoftPath(object)
     if not object then
         return nil
@@ -503,16 +508,10 @@ local function resolveByPath(path)
     local ok, found = pcall(function()
         return StaticFindObject(path)
     end)
-    if not ok or not found then
+    if not ok or not found or not stillValid(found) then
         return nil
     end
-    local okValid, isValid = pcall(function()
-        return found:IsValid()
-    end)
-    if okValid and isValid then
-        return found
-    end
-    return nil
+    return found
 end
 
 local PUMP_INTERVAL = 0.15
@@ -520,7 +519,8 @@ local PUMP_INTERVAL_MS = 150
 
 local pumpTicks = 0
 
-local SCHEDULE_MAX_PER_TICK = 1
+-- Several deferred FX jobs per tick so combat does not stall the queue.
+local SCHEDULE_MAX_PER_TICK = 6
 
 local SCHEDULE_TICK_STRIDE = 1
 
@@ -1726,7 +1726,7 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
             globalSpatterWindowStart = now
             globalSpatterWindowCount = 0
         end
-        local maxPerSec = SPATTER.GlobalMaxPerSecond or 4
+        local maxPerSec = SPATTER.GlobalMaxPerSecond or 8
         if globalSpatterWindowCount >= maxPerSec then
             return
         end
@@ -1790,18 +1790,17 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
     end
 
     local toAttacker = vecNormalize(vecSub(attackerSnapshot, hit))
-    local defenderPath = objectSoftPath(defender)
-    local attackerPath = objectSoftPath(attacker)
-    if not defenderPath then
-        return
-    end
+    local defenderRef = defender
+    local attackerRef = attacker
 
     runOnGameThread(function()
-        local defender = resolveByPath(defenderPath)
-        if not defender then
+        if not stillValid(defenderRef) then
             return
         end
-        local attacker = resolveByPath(attackerPath)
+        local defender = defenderRef
+        local attacker = stillValid(attackerRef) and attackerRef or nil
+        local defenderPath = objectSoftPath(defender)
+        local attackerPath = attacker and objectSoftPath(attacker) or nil
 
         if not getLibraries() then
             log("SPATTER: Kismet/GameplayStatics が見つかりません")
@@ -2073,7 +2072,7 @@ local BLOOD_POOL = {
 
     Enabled     = true,
 
-    Delay       = 0.45,
+    Delay       = 0.25,
     HeightAbove = 40.0,
     Bone        = "pelvis",
 
@@ -2098,154 +2097,153 @@ local function spawnBloodPool(defender, isHeadshotKill)
         return
     end
 
-    local defenderPath = objectSoftPath(defender)
-    if not defenderPath then
+    if not stillValid(defender) then
         return
     end
+    local defenderRef = defender
 
     local function doSpawn()
-        runOnGameThread(function()
-            local succeeded, errorMessage = pcall(function()
-                local defender = resolveByPath(defenderPath)
-                if not defender then
-                    return
+        local succeeded, errorMessage = pcall(function()
+            if not stillValid(defenderRef) then
+                return
+            end
+            local defender = defenderRef
+
+            local firstTime = not assetWarned["BloodPoolClass"]
+
+            local poolClass = cachedBloodPoolClass
+            if not poolClass or not poolClass:IsValid() then
+                local ok, found = pcall(function()
+                    return StaticFindObject("/Game/Mods/BloodFX/BP_BloodPool.BP_BloodPool_C")
+                end)
+                if ok and found and found:IsValid() then
+                    poolClass = found
+                    cachedBloodPoolClass = found
+                else
+                    poolClass = nil
                 end
+            end
 
-                local firstTime = not assetWarned["BloodPoolClass"]
+            if firstTime then
+                assetWarned["BloodPoolClass"] = true
+                if poolClass then
+                    log("BLOOD POOL: クラス取得 OK")
+                else
+                    log("ASSET MISSING: BP_BloodPool_C が見つかりません。"
+                        .. "pakに含まれているか、ModActor にクラス参照変数があるか確認してください。")
+                end
+            end
 
-                local poolClass = cachedBloodPoolClass
-                if not poolClass or not poolClass:IsValid() then
-                    local ok, found = pcall(function()
-                        return StaticFindObject("/Game/Mods/BloodFX/BP_BloodPool.BP_BloodPool_C")
-                    end)
-                    if ok and found and found:IsValid() then
-                        poolClass = found
-                        cachedBloodPoolClass = found
-                    else
-                        poolClass = nil
+            if not poolClass then
+                return
+            end
+
+            local location = nil
+            local mesh = defender.Mesh
+            if mesh and mesh:IsValid() then
+                location = getSocketLocationOrNil(mesh, BLOOD_POOL.Bone)
+            end
+            if not location then
+                location = getActorLocationSnapshot(defender)
+            end
+
+            location.Z = location.Z + BLOOD_POOL.HeightAbove
+
+            local world = defender:GetWorld()
+            if not world or not world:IsValid() then
+                log("BLOOD POOL: World が取得できません")
+                return
+            end
+
+            local actor = world:SpawnActor(poolClass, location, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
+            if not actor or not actor:IsValid() then
+                log("BLOOD POOL: SpawnActor に失敗しました")
+                return
+            end
+
+            if isHeadshotKill and BLOOD_POOL.MarkDecapitation then
+                local okFlag, flagError = pcall(function()
+                    actor.IsDecapitation = true
+                end)
+                if not okFlag then
+                    log(string.format(
+                        "BLOOD POOL: IsDecapitation を書けません %s",
+                        tostring(flagError)))
+                end
+            end
+
+            if BLOOD_POOL.AttachToCorpse then
+                local okAttach, attachError = pcall(function()
+                    local corpseMesh = defender.Mesh
+                    if corpseMesh and corpseMesh:IsValid()
+                        and meshHasSocket(corpseMesh, BLOOD_POOL.Bone) then
+                        actor:K2_AttachToComponent(
+                            corpseMesh, FName(BLOOD_POOL.Bone), 2, 1, 1, false)
                     end
+                end)
+                if not okAttach then
+                    log(string.format("BLOOD POOL: アタッチに失敗 %s", tostring(attachError)))
                 end
+            end
 
-                if firstTime then
-                    assetWarned["BloodPoolClass"] = true
-                    if poolClass then
-                        log("BLOOD POOL: クラス取得 OK")
-                    else
-                        log("ASSET MISSING: BP_BloodPool_C が見つかりません。"
-                            .. "pakに含まれているか、ModActor にクラス参照変数があるか確認してください。")
+            if BLOOD_POOL.RandomMaterial then
+                local okMaterial, materialError = pcall(function()
+                    local decal = actor.BloodDecal
+                    if not decal or not decal:IsValid() then
+                        log("BLOOD POOL: BloodDecal が取得できません")
+                        return
                     end
-                end
 
-                if not poolClass then
-                    return
-                end
+                    local path = BLOOD_POOL.Materials[
+                        math.random(1, #BLOOD_POOL.Materials)]
+                    local material = StaticFindObject(path)
+                    if not material or not material:IsValid() then
 
-                local location = nil
-                local mesh = defender.Mesh
-                if mesh and mesh:IsValid() then
-                    location = getSocketLocationOrNil(mesh, BLOOD_POOL.Bone)
-                end
-                if not location then
-                    location = getActorLocationSnapshot(defender)
-                end
-
-                location.Z = location.Z + BLOOD_POOL.HeightAbove
-
-                local world = defender:GetWorld()
-                if not world or not world:IsValid() then
-                    log("BLOOD POOL: World が取得できません")
-                    return
-                end
-
-                local actor = world:SpawnActor(poolClass, location, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
-                if not actor or not actor:IsValid() then
-                    log("BLOOD POOL: SpawnActor に失敗しました")
-                    return
-                end
-
-                if isHeadshotKill and BLOOD_POOL.MarkDecapitation then
-                    local okFlag, flagError = pcall(function()
-                        actor.IsDecapitation = true
-                    end)
-                    if not okFlag then
                         log(string.format(
-                            "BLOOD POOL: IsDecapitation を書けません %s",
-                            tostring(flagError)))
+                            "BLOOD POOL: マテリアルが見つかりません %s", path))
+                        return
                     end
-                end
 
-                if BLOOD_POOL.AttachToCorpse then
-                    local okAttach, attachError = pcall(function()
-                        local corpseMesh = defender.Mesh
-                        if corpseMesh and corpseMesh:IsValid()
-                            and meshHasSocket(corpseMesh, BLOOD_POOL.Bone) then
-                            actor:K2_AttachToComponent(
-                                corpseMesh, FName(BLOOD_POOL.Bone), 2, 1, 1, false)
-                        end
-                    end)
-                    if not okAttach then
-                        log(string.format("BLOOD POOL: アタッチに失敗 %s", tostring(attachError)))
+                    decal:SetDecalMaterial(material)
+
+                    local mid = decal:CreateDynamicMaterialInstance()
+                    if mid and mid:IsValid() then
+                        actor.MID = mid
                     end
+                end)
+                if not okMaterial then
+                    log(string.format("BLOOD POOL: マテリアル差し替えに失敗 %s",
+                        tostring(materialError)))
                 end
+            end
 
-                if BLOOD_POOL.RandomMaterial then
-                    local okMaterial, materialError = pcall(function()
-                        local decal = actor.BloodDecal
-                        if not decal or not decal:IsValid() then
-                            log("BLOOD POOL: BloodDecal が取得できません")
-                            return
-                        end
-
-                        local path = BLOOD_POOL.Materials[
-                            math.random(1, #BLOOD_POOL.Materials)]
-                        local material = StaticFindObject(path)
-                        if not material or not material:IsValid() then
-
-                            log(string.format(
-                                "BLOOD POOL: マテリアルが見つかりません %s", path))
-                            return
-                        end
-
-                        decal:SetDecalMaterial(material)
-
-                        local mid = decal:CreateDynamicMaterialInstance()
-                        if mid and mid:IsValid() then
-                            actor.MID = mid
-                        end
-                    end)
-                    if not okMaterial then
-                        log(string.format("BLOOD POOL: マテリアル差し替えに失敗 %s",
-                            tostring(materialError)))
-                    end
+            if BLOOD_POOL.SizeScale ~= 1.0 then
+                local okScale, scaleError = pcall(function()
+                    local current = actor:GetActorScale3D()
+                    actor:SetActorScale3D({
+                        X = current.X,
+                        Y = current.Y * BLOOD_POOL.SizeScale,
+                        Z = current.Z * BLOOD_POOL.SizeScale,
+                    })
+                end)
+                if not okScale then
+                    log(string.format("BLOOD POOL: スケール調整に失敗 %s", tostring(scaleError)))
                 end
-
-                if BLOOD_POOL.SizeScale ~= 1.0 then
-                    local okScale, scaleError = pcall(function()
-                        local current = actor:GetActorScale3D()
-                        actor:SetActorScale3D({
-                            X = current.X,
-                            Y = current.Y * BLOOD_POOL.SizeScale,
-                            Z = current.Z * BLOOD_POOL.SizeScale,
-                        })
-                    end)
-                    if not okScale then
-                        log(string.format("BLOOD POOL: スケール調整に失敗 %s", tostring(scaleError)))
-                    end
-                end
-            end)
-
-            if not succeeded then
-                log(string.format("BLOOD POOL ERROR: %s", tostring(errorMessage)))
             end
         end)
+
+        if not succeeded then
+            log(string.format("BLOOD POOL ERROR: %s", tostring(errorMessage)))
+        end
     end
 
-    if BLOOD_POOL.Delay > 0.0 then
-        EnsurePumpAlive()
-        Schedule(BLOOD_POOL.Delay, doSpawn)
-    else
-        doSpawn()
+    -- Always leave the native damage hook first (Schedule already runs on game thread).
+    EnsurePumpAlive()
+    local delay = BLOOD_POOL.Delay
+    if delay == nil or delay < 0.05 then
+        delay = 0.05
     end
+    Schedule(delay, doSpawn)
 end
 
 local NECK_DECAL = {
@@ -2746,29 +2744,30 @@ end
 local function triggerHeadGoreEffect(defender, hitLocation)
 
     local hitLocationSnapshot = snapshotVector(hitLocation)
-    local defenderPath = objectSoftPath(defender)
-    if not defenderPath then
+    if not stillValid(defender) then
         return
     end
+    local defenderRef = defender
 
-    local modActorPath = cachedModActorPath
-    if not modActorPath then
-        local modActor = findBloodFXModActor(defender)
-        if not modActor then
-            log("BRIDGE: BloodFX ModActor was not found in the defender's World")
-            return
-        end
-        modActorPath = cachedModActorPath
+    -- Prefer a live ModActor ref; fall back to cached path resolve.
+    local modActorRef = cachedBloodFXModActor
+    if not stillValid(modActorRef) then
+        modActorRef = findBloodFXModActor(defender)
     end
-    if not modActorPath then
+    if not stillValid(modActorRef) then
+        log("BRIDGE: BloodFX ModActor was not found in the defender's World")
         return
     end
+    local modActorPath = cachedModActorPath
 
     runOnGameThread(function()
         local succeeded, errorMessage = pcall(function()
-            local defender = resolveByPath(defenderPath)
-            local modActor = resolveByPath(modActorPath)
-            if not defender or not modActor then
+            if not stillValid(defenderRef) then
+                return
+            end
+            local defender = defenderRef
+            local modActor = stillValid(modActorRef) and modActorRef or resolveByPath(modActorPath)
+            if not modActor then
                 return
             end
 
@@ -2793,9 +2792,12 @@ local function triggerHeadGoreEffect(defender, hitLocation)
         if HEAD_GORE_NECK_FX_DELAY_TICKS <= 0 then
             runOnGameThread(function()
                 local ok, err = pcall(function()
-                    local defender = resolveByPath(defenderPath)
-                    local modActor = resolveByPath(modActorPath)
-                    if not defender or not modActor then
+                    if not stillValid(defenderRef) then
+                        return
+                    end
+                    local defender = defenderRef
+                    local modActor = stillValid(modActorRef) and modActorRef or resolveByPath(modActorPath)
+                    if not modActor then
                         return
                     end
                     playNeckBloodEffect(modActor, defender)
@@ -2805,15 +2807,16 @@ local function triggerHeadGoreEffect(defender, hitLocation)
                 end
             end)
         else
+            local defenderPath = objectSoftPath(defenderRef)
             if defenderPath and modActorPath then
                 EnsurePumpAlive()
                 Schedule(HEAD_GORE_NECK_FX_DELAY_TICKS * PUMP_INTERVAL, function()
                     local ok, err = pcall(function()
-                        local target = resolveByPath(defenderPath)
+                        local target = stillValid(defenderRef) and defenderRef or resolveByPath(defenderPath)
                         if not target then
                             return
                         end
-                        local owner = resolveByPath(modActorPath)
+                        local owner = stillValid(modActorRef) and modActorRef or resolveByPath(modActorPath)
                         if not owner then
                             return
                         end
@@ -2828,6 +2831,7 @@ local function triggerHeadGoreEffect(defender, hitLocation)
     end
 
     if HEAD_GORE_SILENCE_VOICE then
+        local defenderPath = objectSoftPath(defenderRef)
         if defenderPath then
             EnsurePumpAlive()
             for _, delay in ipairs(HEAD_GORE_SILENCE_REPEATS) do
@@ -2880,7 +2884,7 @@ RegisterLoadMapPostHook(function()
     end
 end)
 
--- Death-path voice silence hooks disabled in 1.0.3 (extra UE4SS AVs during ragdoll).
+-- Death-path voice silence hooks disabled (extra UE4SS AVs during ragdoll).
 
 local function handleDamageReact(
     Context,
@@ -2895,10 +2899,7 @@ local function handleDamageReact(
     end
 
     local defender = damageResult.Defender
-    local okDef, defValid = pcall(function()
-        return defender and defender:IsValid()
-    end)
-    if not okDef or not defValid then
+    if not stillValid(defender) then
         return
     end
 
@@ -2915,58 +2916,61 @@ local function handleDamageReact(
         hitLocation = damageResult.HitLocation
     end)
 
-    -- Pals: skip non-fatal hits entirely (no FX work in the native hook).
-    if isPal and not isDead then
-        return
-    end
+    local attacker = nil
+    pcall(function()
+        attacker = damageResult.Attacker
+    end)
 
-    -- Headshot decapitation is human-NPC only (pal skeletons differ per species).
+    -- Snapshot only; all FX is scheduled off this native hook.
+    local defenderRef = defender
+    local attackerRef = attacker
+    local hitSnap = snapshotVector(hitLocation)
     local isHeadshotKill = human and isDead and isWeak
-    if isHeadshotKill then
-        local okGore, goreErr = pcall(function()
-            triggerHeadGoreEffect(defender, hitLocation)
-        end)
-        if not okGore then
-            log(string.format("HEAD GORE SKIP: %s", tostring(goreErr)))
-        end
-    end
 
-    -- Mesh mutations deferred (SetReceivesDecals inside the hook can AV).
-    if human then
-        local defenderPath = objectSoftPath(defender)
-        if defenderPath then
-            runOnGameThread(function()
-                local target = resolveByPath(defenderPath)
-                if target then
-                    denyDecalsOnMesh(target)
-                end
+    EnsurePumpAlive()
+    Schedule(0.05, function()
+        if not stillValid(defenderRef) then
+            return
+        end
+        local defender = defenderRef
+        local attacker = stillValid(attackerRef) and attackerRef or nil
+
+        if isHeadshotKill then
+            local okGore, goreErr = pcall(function()
+                triggerHeadGoreEffect(defender, hitSnap)
+            end)
+            if not okGore then
+                log(string.format("HEAD GORE SKIP: %s", tostring(goreErr)))
+            end
+        end
+
+        if human then
+            denyDecalsOnMesh(defender)
+        end
+
+        local okSpatter, spatterErr = pcall(function()
+            triggerBloodSpatter(defender, attacker, hitSnap,
+                isHeadshotKill, isPal, isDead)
+        end)
+        if not okSpatter then
+            log(string.format("SPATTER SKIP: %s", tostring(spatterErr)))
+        end
+
+        if isDead then
+            local okPool, poolErr = pcall(function()
+                spawnBloodPool(defender, isHeadshotKill)
+            end)
+            if not okPool then
+                log(string.format("POOL SKIP: %s", tostring(poolErr)))
+            end
+        end
+
+        if isHeadshotKill then
+            pcall(function()
+                spawnNeckGroundDecal(defender, attacker)
             end)
         end
-    end
-
-    local okSpatter, spatterErr = pcall(function()
-        triggerBloodSpatter(defender, damageResult.Attacker, hitLocation,
-            isHeadshotKill, isPal, isDead)
     end)
-    if not okSpatter then
-        log(string.format("SPATTER SKIP: %s", tostring(spatterErr)))
-    end
-
-    if isDead then
-        local okPool, poolErr = pcall(function()
-            spawnBloodPool(defender, isHeadshotKill)
-        end)
-        if not okPool then
-            log(string.format("POOL SKIP: %s", tostring(poolErr)))
-        end
-    end
-
-    if isHeadshotKill then
-        pcall(function()
-            spawnNeckGroundDecal(defender, damageResult.Attacker)
-        end)
-    end
-
 end
 
 RegisterHook("/Script/Pal.PalDamageReactionComponent:MulticastDamageReact", function(
@@ -3057,7 +3061,7 @@ end
 StartPumpLoop()
 
 log("Loaded. Blood for human NPCs + pals. Decapitation: humans only.")
-log("Stability 1.0.3: FX deferred off damage hook; pals death-only; hit Niagara off.")
+log("Stability 1.0.4: FX deferred off damage hook; hit spray restored with throttles.")
 log("Press Ctrl+F8 to scan loaded characters / class ancestry.")
 log("Blood spatter is active (backward toward the attacker, sticks to floors).")
 log("Do NOT load this alongside the original Blood Splatter mod.")

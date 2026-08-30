@@ -7,7 +7,7 @@ Blood FX for **human NPCs and pals** in Palworld. Standalone UE4SS replacement f
 | Target | Hit spray / decals | Death blood pool | Headshot decapitation |
 |--------|--------------------|------------------|------------------------|
 | Human NPCs | Yes | Yes | Yes |
-| Pals (wild / party / base) | Death only (1.0.3+) | Yes | No |
+| Pals (wild / party / base) | Yes (throttled) | Yes | No |
 | Player | No | No | No |
 
 ## Links
