@@ -252,8 +252,14 @@ end
 local SPATTER = {
     Enabled       = true,
 
-    -- 1.0.2 stability: fewer FX under combat spam (UE4SS native AVs).
-    Count         = 2,
+    -- 1.0.3 stability: defer FX off native hooks; pals death-only; no hit Niagara.
+    Count         = 1,
+
+    -- Hit spray on pals is the main combat spam / AV source. Death pools still run.
+    PalHitSpatter = false,
+
+    -- Niagara spawn-at-hit inside combat is a common UE4SS AV vector.
+    ImpactFxEnabled = false,
 
     GroundOnly    = true,
 
@@ -278,8 +284,8 @@ local SPATTER = {
 
     SpreadInterval = 0.0,
 
-    MinIntervalPerActor = 0.85,
-    MinIntervalPerPal = 1.35,
+    MinIntervalPerActor = 1.0,
+    MinIntervalPerPal = 1.5,
 
     HeadshotBypassThrottle = false,
     ConeDegrees   = 35.0,
@@ -290,7 +296,7 @@ local SPATTER = {
     FallHeight    = 250.0,
 
     SizeMin       = 30.0,
-    SizeMax       = 80.0,
+    SizeMax      = 80.0,
     Depth         = 16.0,
 
     LifeSpan      = 120.0,
@@ -312,7 +318,7 @@ local SPATTER = {
 
     FxPooling     = 1,
 
-    ImpactFxInterval = 0.25,
+    ImpactFxInterval = 0.35,
 
     FixedImpactBone = "spine_02",
 
@@ -320,7 +326,7 @@ local SPATTER = {
 
     ForwardRatio  = 0.5,
 
-    GlobalMaxPerSecond = 8,
+    GlobalMaxPerSecond = 4,
 }
 
 local IMPACT_BONES = {
@@ -460,11 +466,53 @@ local lastPumpTick = 0
 local pumpRunning = false
 local pumpGeneration = 0
 
+-- Forward decls: runOnGameThread must defer via Schedule/EnsurePumpAlive.
+local Schedule
+local EnsurePumpAlive
+
+-- Never run FX inline inside native UE4SS hooks (MulticastDamageReact etc.).
+-- Sync UObject calls there cause native AVs that Lua pcall cannot catch.
 local function runOnGameThread(callback)
-    local succeeded, errorMessage = pcall(callback)
-    if not succeeded then
-        log(string.format("GAMETHREAD ERROR: %s", tostring(errorMessage)))
+    EnsurePumpAlive()
+    Schedule(0.05, function()
+        local succeeded, errorMessage = pcall(callback)
+        if not succeeded then
+            log(string.format("GAMETHREAD ERROR: %s", tostring(errorMessage)))
+        end
+    end)
+end
+
+local function objectSoftPath(object)
+    if not object then
+        return nil
     end
+    local path = nil
+    pcall(function()
+        local fullName = object:GetFullName()
+        if fullName then
+            path = string.match(fullName, "^%S+%s+(.+)$") or fullName
+        end
+    end)
+    return path
+end
+
+local function resolveByPath(path)
+    if not path then
+        return nil
+    end
+    local ok, found = pcall(function()
+        return StaticFindObject(path)
+    end)
+    if not ok or not found then
+        return nil
+    end
+    local okValid, isValid = pcall(function()
+        return found:IsValid()
+    end)
+    if okValid and isValid then
+        return found
+    end
+    return nil
 end
 
 local PUMP_INTERVAL = 0.15
@@ -476,7 +524,7 @@ local SCHEDULE_MAX_PER_TICK = 1
 
 local SCHEDULE_TICK_STRIDE = 1
 
-local function Schedule(delaySeconds, callback)
+Schedule = function(delaySeconds, callback)
     local ticks = math.ceil((delaySeconds or 0.0) / PUMP_INTERVAL)
     if ticks < 1 then
         ticks = 1
@@ -550,7 +598,7 @@ local function StartPumpLoop()
     end)
 end
 
-local function EnsurePumpAlive()
+EnsurePumpAlive = function()
     if not pumpRunning then
         StartPumpLoop()
         return
@@ -1643,8 +1691,13 @@ local function scheduleWarmupAttempt(attempt)
     end)
 end
 
-local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKill, isPal)
+local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKill, isPal, isDead)
     if not SPATTER.Enabled then
+        return
+    end
+
+    -- Pals: death-time spray/pool only (hit spam was crashing UE4SS).
+    if isPal and not SPATTER.PalHitSpatter and not isDead then
         return
     end
 
@@ -1673,13 +1726,13 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
             globalSpatterWindowStart = now
             globalSpatterWindowCount = 0
         end
-        local maxPerSec = SPATTER.GlobalMaxPerSecond or 8
+        local maxPerSec = SPATTER.GlobalMaxPerSecond or 4
         if globalSpatterWindowCount >= maxPerSec then
             return
         end
         globalSpatterWindowCount = globalSpatterWindowCount + 1
 
-        local minInterval = SPATTER.MinIntervalPerActor or 0.85
+        local minInterval = SPATTER.MinIntervalPerActor or 1.0
         if isPal and SPATTER.MinIntervalPerPal then
             minInterval = SPATTER.MinIntervalPerPal
         end
@@ -1721,7 +1774,7 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
         end
     end
 
-    if throttled and fxThrottled then
+    if throttled and (fxThrottled or not SPATTER.ImpactFxEnabled) then
         return
     end
 
@@ -1737,8 +1790,19 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
     end
 
     local toAttacker = vecNormalize(vecSub(attackerSnapshot, hit))
+    local defenderPath = objectSoftPath(defender)
+    local attackerPath = objectSoftPath(attacker)
+    if not defenderPath then
+        return
+    end
 
     runOnGameThread(function()
+        local defender = resolveByPath(defenderPath)
+        if not defender then
+            return
+        end
+        local attacker = resolveByPath(attackerPath)
+
         if not getLibraries() then
             log("SPATTER: Kismet/GameplayStatics が見つかりません")
             return
@@ -1768,15 +1832,15 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
             end
         end
 
-        local particleSystem = getModActorAsset(modActor, "HitBloodFX",
-            "/Game/Mods/BloodFX/Realistic_Starter_VFX_Pack_Vol2/Particles/Blood/"
-            .. "P_Blood_Splat_Cone.P_Blood_Splat_Cone")
+        if SPATTER.ImpactFxEnabled and not fxThrottled then
+            local particleSystem = getModActorAsset(modActor, "HitBloodFX",
+                "/Game/Mods/BloodFX/Realistic_Starter_VFX_Pack_Vol2/Particles/Blood/"
+                .. "P_Blood_Splat_Cone.P_Blood_Splat_Cone")
 
-        local fxDirection = toAttacker
-        if not SPATTER.ImpactFxTowardAttacker then
-            fxDirection = { X = -toAttacker.X, Y = -toAttacker.Y, Z = -toAttacker.Z }
-        end
-        if not fxThrottled then
+            local fxDirection = toAttacker
+            if not SPATTER.ImpactFxTowardAttacker then
+                fxDirection = { X = -toAttacker.X, Y = -toAttacker.Y, Z = -toAttacker.Z }
+            end
             playImpactBloodEffect(defender, particleSystem, hit, fxDirection)
         end
 
@@ -1791,27 +1855,6 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
         end
 
         local modActorPath = cachedModActorPath
-
-        local defenderPath = nil
-        local attackerPath = nil
-
-        if not SPATTER.GroundOnly then
-        pcall(function()
-            local fullName = defender:GetFullName()
-            if fullName then
-                defenderPath = string.match(fullName, "^%S+%s+(.+)$") or fullName
-            end
-        end)
-
-        if attacker and attacker:IsValid() then
-            pcall(function()
-                local fullName = attacker:GetFullName()
-                if fullName then
-                    attackerPath = string.match(fullName, "^%S+%s+(.+)$") or fullName
-                end
-            end)
-        end
-        end
 
         local awayFromAttacker = {
             X = -toAttacker.X, Y = -toAttacker.Y, Z = -toAttacker.Z,
@@ -2030,7 +2073,7 @@ local BLOOD_POOL = {
 
     Enabled     = true,
 
-    Delay       = 0.2,
+    Delay       = 0.45,
     HeightAbove = 40.0,
     Bone        = "pelvis",
 
@@ -2055,10 +2098,16 @@ local function spawnBloodPool(defender, isHeadshotKill)
         return
     end
 
+    local defenderPath = objectSoftPath(defender)
+    if not defenderPath then
+        return
+    end
+
     local function doSpawn()
         runOnGameThread(function()
             local succeeded, errorMessage = pcall(function()
-                if not defender or not defender:IsValid() then
+                local defender = resolveByPath(defenderPath)
+                if not defender then
                     return
                 end
 
@@ -2511,7 +2560,7 @@ local function playNeckHitBloodEffect(modActor, defender, isHeadGore)
     end
 end
 
-local HEAD_GORE_SILENCE_VOICE = true
+local HEAD_GORE_SILENCE_VOICE = false
 
 local HEAD_GORE_SILENCE_REPEATS = {}
 
@@ -2697,15 +2746,31 @@ end
 local function triggerHeadGoreEffect(defender, hitLocation)
 
     local hitLocationSnapshot = snapshotVector(hitLocation)
+    local defenderPath = objectSoftPath(defender)
+    if not defenderPath then
+        return
+    end
 
-    local modActor = findBloodFXModActor(defender)
-    if not modActor then
-        log("BRIDGE: BloodFX ModActor was not found in the defender's World")
+    local modActorPath = cachedModActorPath
+    if not modActorPath then
+        local modActor = findBloodFXModActor(defender)
+        if not modActor then
+            log("BRIDGE: BloodFX ModActor was not found in the defender's World")
+            return
+        end
+        modActorPath = cachedModActorPath
+    end
+    if not modActorPath then
         return
     end
 
     runOnGameThread(function()
         local succeeded, errorMessage = pcall(function()
+            local defender = resolveByPath(defenderPath)
+            local modActor = resolveByPath(modActorPath)
+            if not defender or not modActor then
+                return
+            end
 
             silenceActorVoice(defender)
             markForSilence(defender)
@@ -2728,6 +2793,11 @@ local function triggerHeadGoreEffect(defender, hitLocation)
         if HEAD_GORE_NECK_FX_DELAY_TICKS <= 0 then
             runOnGameThread(function()
                 local ok, err = pcall(function()
+                    local defender = resolveByPath(defenderPath)
+                    local modActor = resolveByPath(modActorPath)
+                    if not defender or not modActor then
+                        return
+                    end
                     playNeckBloodEffect(modActor, defender)
                 end)
                 if not ok then
@@ -2735,25 +2805,16 @@ local function triggerHeadGoreEffect(defender, hitLocation)
                 end
             end)
         else
-            local defenderPath = nil
-            local modActorPath = cachedModActorPath
-            pcall(function()
-                local fullName = defender:GetFullName()
-                if fullName then
-                    defenderPath = string.match(fullName, "^%S+%s+(.+)$") or fullName
-                end
-            end)
-
             if defenderPath and modActorPath then
                 EnsurePumpAlive()
                 Schedule(HEAD_GORE_NECK_FX_DELAY_TICKS * PUMP_INTERVAL, function()
                     local ok, err = pcall(function()
-                        local target = StaticFindObject(defenderPath)
-                        if not target or not target:IsValid() then
+                        local target = resolveByPath(defenderPath)
+                        if not target then
                             return
                         end
-                        local owner = StaticFindObject(modActorPath)
-                        if not owner or not owner:IsValid() then
+                        local owner = resolveByPath(modActorPath)
+                        if not owner then
                             return
                         end
                         playNeckBloodEffect(owner, target)
@@ -2767,20 +2828,11 @@ local function triggerHeadGoreEffect(defender, hitLocation)
     end
 
     if HEAD_GORE_SILENCE_VOICE then
-        local path = nil
-        pcall(function()
-
-            local fullName = defender:GetFullName()
-            if fullName then
-                path = string.match(fullName, "^%S+%s+(.+)$") or fullName
-            end
-        end)
-
-        if path then
+        if defenderPath then
             EnsurePumpAlive()
             for _, delay in ipairs(HEAD_GORE_SILENCE_REPEATS) do
                 Schedule(delay, function()
-                    silenceByPath(path)
+                    silenceByPath(defenderPath)
                 end)
             end
         end
@@ -2828,29 +2880,7 @@ RegisterLoadMapPostHook(function()
     end
 end)
 
-RegisterHook("/Script/Pal.PalUtility:ProcessDeadAction",
-    function() end,
-    function(Context, CharacterParameter)
-        pcall(function()
-            silenceIfMarked(unwrap(CharacterParameter), "ProcessDeadAction")
-        end)
-    end)
-
-RegisterHook("/Script/Pal.PalUtility:SetCharacterRagdoll",
-    function() end,
-    function(Context, CharacterParameter)
-        pcall(function()
-            silenceIfMarked(unwrap(CharacterParameter), "SetCharacterRagdoll")
-        end)
-    end)
-
-RegisterHook("/Script/Pal.PalCharacter:OnDeadCharacter",
-    function() end,
-    function(Context)
-        pcall(function()
-            silenceIfMarked(unwrap(Context), "OnDeadCharacter")
-        end)
-    end)
+-- Death-path voice silence hooks disabled in 1.0.3 (extra UE4SS AVs during ragdoll).
 
 local function handleDamageReact(
     Context,
@@ -2885,6 +2915,11 @@ local function handleDamageReact(
         hitLocation = damageResult.HitLocation
     end)
 
+    -- Pals: skip non-fatal hits entirely (no FX work in the native hook).
+    if isPal and not isDead then
+        return
+    end
+
     -- Headshot decapitation is human-NPC only (pal skeletons differ per species).
     local isHeadshotKill = human and isDead and isWeak
     if isHeadshotKill then
@@ -2896,14 +2931,22 @@ local function handleDamageReact(
         end
     end
 
-    -- SetReceivesDecals on every pal hit is expensive; humans only is enough.
+    -- Mesh mutations deferred (SetReceivesDecals inside the hook can AV).
     if human then
-        denyDecalsOnMesh(defender)
+        local defenderPath = objectSoftPath(defender)
+        if defenderPath then
+            runOnGameThread(function()
+                local target = resolveByPath(defenderPath)
+                if target then
+                    denyDecalsOnMesh(target)
+                end
+            end)
+        end
     end
 
     local okSpatter, spatterErr = pcall(function()
         triggerBloodSpatter(defender, damageResult.Attacker, hitLocation,
-            isHeadshotKill, isPal)
+            isHeadshotKill, isPal, isDead)
     end)
     if not okSpatter then
         log(string.format("SPATTER SKIP: %s", tostring(spatterErr)))
@@ -3014,7 +3057,7 @@ end
 StartPumpLoop()
 
 log("Loaded. Blood for human NPCs + pals. Decapitation: humans only.")
-log("Stability 1.0.2: reduced combat FX rate (walls off, pools unattached, harder throttles).")
+log("Stability 1.0.3: FX deferred off damage hook; pals death-only; hit Niagara off.")
 log("Press Ctrl+F8 to scan loaded characters / class ancestry.")
 log("Blood spatter is active (backward toward the attacker, sticks to floors).")
 log("Do NOT load this alongside the original Blood Splatter mod.")
