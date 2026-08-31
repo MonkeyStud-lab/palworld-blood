@@ -252,12 +252,13 @@ end
 local SPATTER = {
     Enabled       = true,
 
-    -- 1.0.4: FX still deferred off the damage hook; visuals restored with throttles.
+    -- 1.0.5: keep deferral; drop hit Niagara (AV vector); ground decals only.
     Count         = 2,
 
     PalHitSpatter = true,
 
-    ImpactFxEnabled = true,
+    -- Hit Niagara attached/spawned through UE4SS is the main AV source.
+    ImpactFxEnabled = false,
 
     GroundOnly    = true,
 
@@ -283,7 +284,7 @@ local SPATTER = {
     SpreadInterval = 0.0,
 
     MinIntervalPerActor = 0.85,
-    MinIntervalPerPal = 1.2,
+    MinIntervalPerPal = 1.25,
 
     HeadshotBypassThrottle = false,
     ConeDegrees   = 35.0,
@@ -316,7 +317,7 @@ local SPATTER = {
 
     FxPooling     = 1,
 
-    ImpactFxInterval = 0.3,
+    ImpactFxInterval = 0.35,
 
     FixedImpactBone = "spine_02",
 
@@ -324,7 +325,7 @@ local SPATTER = {
 
     ForwardRatio  = 0.5,
 
-    GlobalMaxPerSecond = 8,
+    GlobalMaxPerSecond = 6,
 }
 
 local IMPACT_BONES = {
@@ -518,11 +519,15 @@ local PUMP_INTERVAL = 0.15
 local PUMP_INTERVAL_MS = 150
 
 local pumpTicks = 0
+local lastPumpRestartAt = 0
 
 -- Several deferred FX jobs per tick so combat does not stall the queue.
-local SCHEDULE_MAX_PER_TICK = 6
+local SCHEDULE_MAX_PER_TICK = 4
 
 local SCHEDULE_TICK_STRIDE = 1
+
+-- os.time() is 1s resolution; only treat the pump as dead after a long gap.
+local PUMP_DEAD_SECONDS = 15
 
 Schedule = function(delaySeconds, callback)
     local ticks = math.ceil((delaySeconds or 0.0) / PUMP_INTERVAL)
@@ -576,17 +581,26 @@ local function pumpSchedule()
 end
 
 local function StartPumpLoop()
+    local now = nowSeconds()
+    -- Avoid restart storms that kill LoopAsync before it can tick.
+    if pumpRunning and (now - lastPumpRestartAt) < 5 then
+        return
+    end
+
     pumpRunning = true
-    lastPumpTick = nowSeconds()
+    lastPumpTick = now
+    lastPumpRestartAt = now
 
     pumpGeneration = pumpGeneration + 1
     local myGeneration = pumpGeneration
 
     LoopAsync(PUMP_INTERVAL_MS, function()
-
         if myGeneration ~= pumpGeneration then
             return true
         end
+
+        -- Heartbeat even if the game-thread callback is delayed.
+        lastPumpTick = nowSeconds()
 
         ExecuteInGameThread(function()
             local succeeded, errorMessage = pcall(pumpSchedule)
@@ -603,10 +617,10 @@ EnsurePumpAlive = function()
         StartPumpLoop()
         return
     end
-    if nowSeconds() - lastPumpTick > 3.0 then
+    if nowSeconds() - lastPumpTick > PUMP_DEAD_SECONDS then
         log("schedule pump was dead -> restarted")
+        -- Do NOT call pumpSchedule() here: that can run FX mid-combat with stale objects.
         StartPumpLoop()
-        pumpSchedule()
     end
 end
 
@@ -2397,9 +2411,9 @@ end
 
 local NECK_BONE_NAME = "neck_01"
 
-local HEAD_GORE_ATTACH = true
+local HEAD_GORE_ATTACH = false
 
-local HEAD_GORE_FX_POOLING = 1
+local HEAD_GORE_FX_POOLING = 0
 
 local function playHeadGoreEffect(modActor, defender, location)
     local component = modActor.HeadGoreFX
@@ -2507,9 +2521,9 @@ local function playNeckBloodEffect(modActor, defender)
     )
 end
 
-local HEAD_GORE_USE_HIT_FX = true
+local HEAD_GORE_USE_HIT_FX = false
 
-local HEAD_GORE_USE_ARTERIAL_FX = true
+local HEAD_GORE_USE_ARTERIAL_FX = false
 
 local NECK_HIT_FX_PITCH = 0.0
 local NECK_HIT_FX_YAW = 0.0
@@ -3061,7 +3075,7 @@ end
 StartPumpLoop()
 
 log("Loaded. Blood for human NPCs + pals. Decapitation: humans only.")
-log("Stability 1.0.4: FX deferred off damage hook; hit spray restored with throttles.")
+log("Stability 1.0.5: fixed FX pump thrash; hit Niagara + neck geyser off (decals/pools/decap keep).")
 log("Press Ctrl+F8 to scan loaded characters / class ancestry.")
 log("Blood spatter is active (backward toward the attacker, sticks to floors).")
 log("Do NOT load this alongside the original Blood Splatter mod.")

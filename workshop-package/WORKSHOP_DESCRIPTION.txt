@@ -11,7 +11,7 @@ Requirements
 Important
 - Do NOT use together with the original Blood Splatter mod (petyr1710). Unsubscribe/disable the original to avoid double FX/crashes.
 - Client-side visuals only. Mature/gore content.
-- v1.0.4: combat FX deferred off the damage hook (stability) with hit spray restored
+- v1.0.5: fixed deferred FX pump thrash; hit Niagara/neck geyser off for stability (ground decals + pools + human decap remain)
 
 Credits
 - Based on Blood Splatter by petyr1710
