@@ -1,8 +1,8 @@
 ﻿Blood splatter for human NPCs and Pals.
 
 Effects
-- Humans: hit blood spray + ground decals, death pools, headshot decapitation
-- Pals: hit blood (throttled) + death pools
+- Humans: ground blood decals, death pools, headshot decapitation
+- Pals: hit blood (throttled) + death pools — boss pals (_BOSS) skipped for stability
 - Player: no blood FX
 
 Requirements
@@ -11,7 +11,7 @@ Requirements
 Important
 - Do NOT use together with the original Blood Splatter mod (petyr1710). Unsubscribe/disable the original to avoid double FX/crashes.
 - Client-side visuals only. Mature/gore content.
-- v1.0.5: fixed deferred FX pump thrash; hit Niagara/neck geyser off for stability (ground decals + pools + human decap remain)
+- v1.0.6: skip blood FX on boss pals (_BOSS) to reduce UE4SS combat crashes; hit Niagara/neck geyser remain off
 
 Credits
 - Based on Blood Splatter by petyr1710

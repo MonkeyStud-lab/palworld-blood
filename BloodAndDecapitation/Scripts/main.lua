@@ -1,4 +1,4 @@
-local MOD_TAG = "[BloodSplatterBoth]"
+﻿local MOD_TAG = "[BloodSplatterBoth]"
 
 local function log(message)
     print(string.format("%s %s\n", MOD_TAG, message))
@@ -145,7 +145,46 @@ local function isPalCreature(actor)
     return ancestryContainsAny(getClassAncestryNames(class), PAL_CREATURE_BASES)
 end
 
+-- Alpha/raid/tower bosses (class names like Mothman_BOSS, FlowerDoll_Fire_BOSS).
+local function isBossPal(actor)
+    if not actor or not actor:IsValid() then
+        return false
+    end
+    if isHumanNPC(actor) or isPlayerCharacter(actor) then
+        return false
+    end
+
+    local names = {}
+    local okClass, class = pcall(function()
+        return actor:GetClass()
+    end)
+    if okClass and class and class:IsValid() then
+        names = getClassAncestryNames(class)
+    end
+
+    local okFull, fullName = pcall(function()
+        return actor:GetFullName()
+    end)
+    if okFull and fullName then
+        names[#names + 1] = fullName
+    end
+
+    for i = 1, #names do
+        local n = names[i]
+        if n and (string.find(n, "_BOSS", 1, true)
+            or string.find(n, "BOSS_", 1, true)
+            or string.find(n, "_Boss", 1, true)) then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function isBloodEligible(actor)
+    if isBossPal(actor) then
+        return false
+    end
     return isHumanNPC(actor) or isPalCreature(actor)
 end
 
@@ -204,9 +243,9 @@ local function findBloodFXModActor(worldContext)
     if not actors then
         if not modActorMissingLogged then
             modActorMissingLogged = true
-            log("BRIDGE: ModActor_C が1つも見つかりません。"
-                .. "このレベルでは血の表現が出ません。"
-                .. string.format("再検索は%d秒おきに行います。",
+            log("BRIDGE: ModActor_C ãŒ1ã¤ã‚‚è¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã€‚"
+                .. "ã“ã®ãƒ¬ãƒ™ãƒ«ã§ã¯è¡€ã®è¡¨ç¾ãŒå‡ºã¾ã›ã‚“ã€‚"
+                .. string.format("å†æ¤œç´¢ã¯%dç§’ãŠãã«è¡Œã„ã¾ã™ã€‚",
                     MODACTOR_RETRY_INTERVAL))
         end
         return nil
@@ -237,6 +276,70 @@ local function findBloodFXModActor(worldContext)
     return nil
 end
 
+-- ---------------------------------------------------------------------------
+-- Blueprint-first relay (approach #1)
+-- Lua snapshots hit primitives; BP ModActor should spawn FX.
+-- Current BloodFX.pak only has SpawnWallSplatter â€” other methods need a recook.
+-- See docs/BP_RELAY.md
+-- ---------------------------------------------------------------------------
+local BP_RELAY = {
+    -- false = Lua owns FX (shipped BloodFX.pak). true = try ModActor methods first if recooked later.
+    PreferBP = false,
+}
+
+local bpMethodAvailable = {}
+local bpCapabilitiesLogged = false
+
+local function tryCallModActor(modActor, methodName, ...)
+    if not BP_RELAY.PreferBP then
+        return false
+    end
+    if not modActor then
+        return false
+    end
+    local okValid, isValid = pcall(function()
+        return modActor:IsValid()
+    end)
+    if not okValid or not isValid then
+        return false
+    end
+    if bpMethodAvailable[methodName] == false then
+        return false
+    end
+
+    local args = { ... }
+    local ok, err = pcall(function()
+        local method = modActor[methodName]
+        if method == nil then
+            error(methodName .. " missing")
+        end
+        method(modActor, table.unpack(args))
+    end)
+
+    if not ok then
+        bpMethodAvailable[methodName] = false
+        return false
+    end
+
+    bpMethodAvailable[methodName] = true
+    return true
+end
+
+local function logBpCapabilitiesOnce()
+    if bpCapabilitiesLogged then
+        return
+    end
+    bpCapabilitiesLogged = true
+    log(string.format(
+        "BP RELAY: PreferBP=%s SpawnHitBlood=%s SpawnGroundBlood=%s SpawnWallSplatter=%s SpawnBloodPoolAt=%s SpawnHeadGoreAt=%s (missing=need recook, see docs/BP_RELAY.md)",
+        tostring(BP_RELAY.PreferBP),
+        tostring(bpMethodAvailable.SpawnHitBlood),
+        tostring(bpMethodAvailable.SpawnGroundBlood),
+        tostring(bpMethodAvailable.SpawnWallSplatter),
+        tostring(bpMethodAvailable.SpawnBloodPoolAt),
+        tostring(bpMethodAvailable.SpawnHeadGoreAt)))
+end
+
 local function snapshotVector(vector)
     if not vector then
         return { X = 0.0, Y = 0.0, Z = 0.0 }
@@ -252,12 +355,13 @@ end
 local SPATTER = {
     Enabled       = true,
 
-    -- 1.0.5: keep deferral; drop hit Niagara (AV vector); ground decals only.
+    -- Lua deferred FX (same stability path as 1.0.5). Optional BP relay if PreferBP + cooked methods.
     Count         = 2,
 
+    -- Normal pals keep hit spatter; bosses are skipped entirely via isBossPal().
     PalHitSpatter = true,
 
-    -- Hit Niagara attached/spawned through UE4SS is the main AV source.
+    -- Hit Niagara via Lua stays off (AV vector). Enable in BP via SpawnHitBlood.
     ImpactFxEnabled = false,
 
     GroundOnly    = true,
@@ -270,7 +374,8 @@ local SPATTER = {
 
     WallOnlyOnHeadshot = true,
 
-    WallViaBP = false,
+    -- Prefer existing BP wall helper when wall path is enabled.
+    WallViaBP = true,
 
     WallCount     = 1,
     WallRange     = 400.0,
@@ -655,8 +760,8 @@ local function getModActorAsset(modActor, propertyName, fallbackPath)
     if not assetWarned[propertyName] then
         assetWarned[propertyName] = true
         log(string.format(
-            "ASSET MISSING: ModActor.%s が未設定です。UEでModActorに変数を追加し、"
-            .. "既定値にアセットを設定してクックし直してください。", propertyName))
+            "ASSET MISSING: ModActor.%s ãŒæœªè¨­å®šã§ã™ã€‚UEã§ModActorã«å¤‰æ•°ã‚’è¿½åŠ ã—ã€"
+            .. "æ—¢å®šå€¤ã«ã‚¢ã‚»ãƒƒãƒˆã‚’è¨­å®šã—ã¦ã‚¯ãƒƒã‚¯ã—ç›´ã—ã¦ãã ã•ã„ã€‚", propertyName))
     end
     return nil
 end
@@ -780,7 +885,7 @@ local function getNiagaraLibrary()
     if niagaraLibrary and niagaraLibrary:IsValid() then
         return niagaraLibrary
     end
-    log("FX: NiagaraFunctionLibrary が見つかりません")
+    log("FX: NiagaraFunctionLibrary ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“")
     return nil
 end
 
@@ -1352,7 +1457,7 @@ local function applyBodyBlood(defender, modActor, hitLocation)
         if not overlaySource or not overlaySource:IsValid() then
             if not assetWarned["BloodOverlayMaterial"] then
                 assetWarned["BloodOverlayMaterial"] = true
-                log("ASSET MISSING: ModActor.BloodOverlayMaterial が未設定です")
+                log("ASSET MISSING: ModActor.BloodOverlayMaterial ãŒæœªè¨­å®šã§ã™")
             end
             return
         end
@@ -1402,12 +1507,12 @@ local function applyBodyBlood(defender, modActor, hitLocation)
                 end
                 if not cachedSkelMeshCompClass
                     or not cachedSkelMeshCompClass:IsValid() then
-                    error("SkeletalMeshComponent クラスが見つかりません")
+                    error("SkeletalMeshComponent ã‚¯ãƒ©ã‚¹ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“")
                 end
                 local parts = defender:K2_GetComponentsByClass(
                     cachedSkelMeshCompClass)
                 if not parts then
-                    error("K2_GetComponentsByClass が nil を返しました")
+                    error("K2_GetComponentsByClass ãŒ nil ã‚’è¿”ã—ã¾ã—ãŸ")
                 end
                 local total, applied = 0, 0
                 local names = {}
@@ -1441,7 +1546,7 @@ local function applyBodyBlood(defender, modActor, hitLocation)
                 if not assetWarned["BodyBloodParts"] then
                     assetWarned["BodyBloodParts"] = true
                     log(string.format(
-                        "BODY BLOOD: 部品 %d 件中 %d 件へ配布 [%s]",
+                        "BODY BLOOD: éƒ¨å“ %d ä»¶ä¸­ %d ä»¶ã¸é…å¸ƒ [%s]",
                         total, applied, table.concat(names, ", ")))
                 end
             end)
@@ -1466,7 +1571,7 @@ local function applyBodyBlood(defender, modActor, hitLocation)
                             dumpBone, ref.position.X, ref.position.Y,
                             ref.position.Z))
                     else
-                        log(string.format("REF DUMP %-12s 取得失敗", dumpBone))
+                        log(string.format("REF DUMP %-12s å–å¾—å¤±æ•—", dumpBone))
                     end
                 end
             end
@@ -1479,7 +1584,7 @@ local function applyBodyBlood(defender, modActor, hitLocation)
                 { R = 0.0, G = 0.0, B = 30.0, A = 1.0 })
             if not assetWarned["BodyBloodProbe"] then
                 assetWarned["BodyBloodProbe"] = true
-                log("BODY BLOOD PROBE: Hit0=(0,0,120) Hit1=(0,0,30) を書き込みました")
+                log("BODY BLOOD PROBE: Hit0=(0,0,120) Hit1=(0,0,30) ã‚’æ›¸ãè¾¼ã¿ã¾ã—ãŸ")
             end
             return
         end
@@ -1541,7 +1646,7 @@ local function applyBodyBlood(defender, modActor, hitLocation)
             and rawDistance > BODY_BLOOD.RejectDistance then
             if BODY_BLOOD.DebugLog then
                 log(string.format(
-                    "BODY BLOOD SKIP bone=%s dist=%.1f (異常値)",
+                    "BODY BLOOD SKIP bone=%s dist=%.1f (ç•°å¸¸å€¤)",
                     boneName, rawDistance))
             end
             return
@@ -1679,7 +1784,7 @@ local function runShaderWarmup()
         end
 
         log(string.format(
-            "WARMUP: シェーダを温めました (デカール%d種 + FX2種 + 体表の血=%s)",
+            "WARMUP: ã‚·ã‚§ãƒ¼ãƒ€ã‚’æ¸©ã‚ã¾ã—ãŸ (ãƒ‡ã‚«ãƒ¼ãƒ«%dç¨® + FX2ç¨® + ä½“è¡¨ã®è¡€=%s)",
             count, tostring(overlayWarmed)))
     end)
 
@@ -1699,7 +1804,7 @@ local function scheduleWarmupAttempt(attempt)
             if attempt < SHADER_WARMUP.MaxAttempts then
                 scheduleWarmupAttempt(attempt + 1)
             else
-                log("WARMUP: 再試行の上限に達しました。最初の被弾時に温めます")
+                log("WARMUP: å†è©¦è¡Œã®ä¸Šé™ã«é”ã—ã¾ã—ãŸã€‚æœ€åˆã®è¢«å¼¾æ™‚ã«æ¸©ã‚ã¾ã™")
             end
         end
     end)
@@ -1817,13 +1922,66 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
         local attackerPath = attacker and objectSoftPath(attacker) or nil
 
         if not getLibraries() then
-            log("SPATTER: Kismet/GameplayStatics が見つかりません")
+            log("SPATTER: Kismet/GameplayStatics ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“")
             return
         end
 
         local modActor = findBloodFXModActor(defender)
 
         runShaderWarmup()
+
+        local awayFromAttacker = {
+            X = -toAttacker.X, Y = -toAttacker.Y, Z = -toAttacker.Z,
+        }
+        local fxDirection = toAttacker
+        if not SPATTER.ImpactFxTowardAttacker then
+            fxDirection = awayFromAttacker
+        end
+
+        -- Optional ModActor helpers when PreferBP and methods exist; else Lua below.
+        local bpHit = false
+        if SPATTER.ImpactFxEnabled and not fxThrottled then
+            bpHit = tryCallModActor(modActor, "SpawnHitBlood", hit, fxDirection, 1.0)
+            if not bpHit then
+                local particleSystem = getModActorAsset(modActor, "HitBloodFX",
+                    "/Game/Mods/BloodFX/Realistic_Starter_VFX_Pack_Vol2/Particles/Blood/"
+                    .. "P_Blood_Splat_Cone.P_Blood_Splat_Cone")
+                playImpactBloodEffect(defender, particleSystem, hit, fxDirection)
+            end
+        end
+
+        if not throttled then
+            local groundHint = hit
+            if SPATTER.GroundFromCapsule then
+                pcall(function()
+                    local capsule = defender.CapsuleComponent
+                    if capsule and capsule:IsValid() then
+                        local center = defender:K2_GetActorLocation()
+                        local halfHeight = capsule:GetScaledCapsuleHalfHeight()
+                        if halfHeight and halfHeight > 0.0 then
+                            groundHint = {
+                                X = hit.X, Y = hit.Y,
+                                Z = center.Z - halfHeight,
+                            }
+                        end
+                    end
+                end)
+            end
+
+            local size = SPATTER.SizeMin
+                + math.random() * (SPATTER.SizeMax - SPATTER.SizeMin)
+            local bpGround = tryCallModActor(
+                modActor,
+                "SpawnGroundBlood",
+                groundHint,
+                awayFromAttacker,
+                SPATTER.Count,
+                size)
+            logBpCapabilitiesOnce()
+            if bpGround then
+                return
+            end
+        end
 
         local materials, foundName = cachedDecalMaterials, cachedDecalMaterialSource
         local rolls = cachedDecalRolls
@@ -1837,24 +1995,12 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
         if not assetWarned["BloodDecalMaterialList"] then
             assetWarned["BloodDecalMaterialList"] = true
             if materials then
-                log(string.format("SPATTER: デカールのマテリアル %d 件を取得 (%s)",
+                log(string.format("SPATTER: ãƒ‡ã‚«ãƒ¼ãƒ«ã®ãƒžãƒ†ãƒªã‚¢ãƒ« %d ä»¶ã‚’å–å¾— (%s)",
                     #materials, tostring(foundName)))
             else
-                log("ASSET MISSING: ModActor.BloodDecalMaterial が未設定です。"
-                    .. "UEでModActorに変数を追加し、既定値にアセットを設定してクックし直してください。")
+                log("ASSET MISSING: ModActor.BloodDecalMaterial ãŒæœªè¨­å®šã§ã™ã€‚"
+                    .. "UEã§ModActorã«å¤‰æ•°ã‚’è¿½åŠ ã—ã€æ—¢å®šå€¤ã«ã‚¢ã‚»ãƒƒãƒˆã‚’è¨­å®šã—ã¦ã‚¯ãƒƒã‚¯ã—ç›´ã—ã¦ãã ã•ã„ã€‚")
             end
-        end
-
-        if SPATTER.ImpactFxEnabled and not fxThrottled then
-            local particleSystem = getModActorAsset(modActor, "HitBloodFX",
-                "/Game/Mods/BloodFX/Realistic_Starter_VFX_Pack_Vol2/Particles/Blood/"
-                .. "P_Blood_Splat_Cone.P_Blood_Splat_Cone")
-
-            local fxDirection = toAttacker
-            if not SPATTER.ImpactFxTowardAttacker then
-                fxDirection = { X = -toAttacker.X, Y = -toAttacker.Y, Z = -toAttacker.Z }
-            end
-            playImpactBloodEffect(defender, particleSystem, hit, fxDirection)
         end
 
         applyBodyBlood(defender, modActor, hit)
@@ -1868,10 +2014,6 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
         end
 
         local modActorPath = cachedModActorPath
-
-        local awayFromAttacker = {
-            X = -toAttacker.X, Y = -toAttacker.Y, Z = -toAttacker.Z,
-        }
 
         local groundLocation, groundNormal = nil, nil
         if SPATTER.GroundOnly then
@@ -1928,18 +2070,26 @@ local function triggerBloodSpatter(defender, attacker, hitLocation, isHeadshotKi
                     if isHeadshotKill then
                         wallScale = SPATTER.HeadshotWallScale
                     end
-                    local okWall, wallError = pcall(function()
-                        modActor:SpawnWallSplatter(
-                            { X = hit.X, Y = hit.Y, Z = hit.Z },
-                            { X = flat.X, Y = flat.Y, Z = 0.0 },
-                            wallScale)
-                    end)
+                    local usedBp = tryCallModActor(
+                        modActor,
+                        "SpawnWallSplatter",
+                        { X = hit.X, Y = hit.Y, Z = hit.Z },
+                        { X = flat.X, Y = flat.Y, Z = 0.0 },
+                        wallScale)
+                    if not usedBp then
+                        local okWall, wallError = pcall(function()
+                            modActor:SpawnWallSplatter(
+                                { X = hit.X, Y = hit.Y, Z = hit.Z },
+                                { X = flat.X, Y = flat.Y, Z = 0.0 },
+                                wallScale)
+                        end)
 
-                    if not okWall then
-                        if not assetWarned["SpawnWallSplatter"] then
-                            assetWarned["SpawnWallSplatter"] = true
-                            log(string.format("WALL BP ERROR: %s",
-                                tostring(wallError)))
+                        if not okWall then
+                            if not assetWarned["SpawnWallSplatter"] then
+                                assetWarned["SpawnWallSplatter"] = true
+                                log(string.format("WALL BP ERROR: %s",
+                                    tostring(wallError)))
+                            end
                         end
                     end
                 else
@@ -2123,6 +2273,23 @@ local function spawnBloodPool(defender, isHeadshotKill)
             end
             local defender = defenderRef
 
+            local location = nil
+            local mesh = defender.Mesh
+            if mesh and mesh:IsValid() then
+                location = getSocketLocationOrNil(mesh, BLOOD_POOL.Bone)
+            end
+            if not location then
+                location = getActorLocationSnapshot(defender)
+            end
+            location.Z = location.Z + BLOOD_POOL.HeightAbove
+
+            local modActor = findBloodFXModActor(defender)
+            if tryCallModActor(modActor, "SpawnBloodPoolAt", location, isHeadshotKill == true) then
+                logBpCapabilitiesOnce()
+                return
+            end
+            logBpCapabilitiesOnce()
+
             local firstTime = not assetWarned["BloodPoolClass"]
 
             local poolClass = cachedBloodPoolClass
@@ -2141,10 +2308,10 @@ local function spawnBloodPool(defender, isHeadshotKill)
             if firstTime then
                 assetWarned["BloodPoolClass"] = true
                 if poolClass then
-                    log("BLOOD POOL: クラス取得 OK")
+                    log("BLOOD POOL: ã‚¯ãƒ©ã‚¹å–å¾— OK")
                 else
-                    log("ASSET MISSING: BP_BloodPool_C が見つかりません。"
-                        .. "pakに含まれているか、ModActor にクラス参照変数があるか確認してください。")
+                    log("ASSET MISSING: BP_BloodPool_C ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã€‚"
+                        .. "pakã«å«ã¾ã‚Œã¦ã„ã‚‹ã‹ã€ModActor ã«ã‚¯ãƒ©ã‚¹å‚ç…§å¤‰æ•°ãŒã‚ã‚‹ã‹ç¢ºèªã—ã¦ãã ã•ã„ã€‚")
                 end
             end
 
@@ -2152,26 +2319,15 @@ local function spawnBloodPool(defender, isHeadshotKill)
                 return
             end
 
-            local location = nil
-            local mesh = defender.Mesh
-            if mesh and mesh:IsValid() then
-                location = getSocketLocationOrNil(mesh, BLOOD_POOL.Bone)
-            end
-            if not location then
-                location = getActorLocationSnapshot(defender)
-            end
-
-            location.Z = location.Z + BLOOD_POOL.HeightAbove
-
             local world = defender:GetWorld()
             if not world or not world:IsValid() then
-                log("BLOOD POOL: World が取得できません")
+                log("BLOOD POOL: World ãŒå–å¾—ã§ãã¾ã›ã‚“")
                 return
             end
 
             local actor = world:SpawnActor(poolClass, location, { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 })
             if not actor or not actor:IsValid() then
-                log("BLOOD POOL: SpawnActor に失敗しました")
+                log("BLOOD POOL: SpawnActor ã«å¤±æ•—ã—ã¾ã—ãŸ")
                 return
             end
 
@@ -2181,7 +2337,7 @@ local function spawnBloodPool(defender, isHeadshotKill)
                 end)
                 if not okFlag then
                     log(string.format(
-                        "BLOOD POOL: IsDecapitation を書けません %s",
+                        "BLOOD POOL: IsDecapitation ã‚’æ›¸ã‘ã¾ã›ã‚“ %s",
                         tostring(flagError)))
                 end
             end
@@ -2196,7 +2352,7 @@ local function spawnBloodPool(defender, isHeadshotKill)
                     end
                 end)
                 if not okAttach then
-                    log(string.format("BLOOD POOL: アタッチに失敗 %s", tostring(attachError)))
+                    log(string.format("BLOOD POOL: ã‚¢ã‚¿ãƒƒãƒã«å¤±æ•— %s", tostring(attachError)))
                 end
             end
 
@@ -2204,7 +2360,7 @@ local function spawnBloodPool(defender, isHeadshotKill)
                 local okMaterial, materialError = pcall(function()
                     local decal = actor.BloodDecal
                     if not decal or not decal:IsValid() then
-                        log("BLOOD POOL: BloodDecal が取得できません")
+                        log("BLOOD POOL: BloodDecal ãŒå–å¾—ã§ãã¾ã›ã‚“")
                         return
                     end
 
@@ -2214,7 +2370,7 @@ local function spawnBloodPool(defender, isHeadshotKill)
                     if not material or not material:IsValid() then
 
                         log(string.format(
-                            "BLOOD POOL: マテリアルが見つかりません %s", path))
+                            "BLOOD POOL: ãƒžãƒ†ãƒªã‚¢ãƒ«ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ %s", path))
                         return
                     end
 
@@ -2226,7 +2382,7 @@ local function spawnBloodPool(defender, isHeadshotKill)
                     end
                 end)
                 if not okMaterial then
-                    log(string.format("BLOOD POOL: マテリアル差し替えに失敗 %s",
+                    log(string.format("BLOOD POOL: ãƒžãƒ†ãƒªã‚¢ãƒ«å·®ã—æ›¿ãˆã«å¤±æ•— %s",
                         tostring(materialError)))
                 end
             end
@@ -2241,7 +2397,7 @@ local function spawnBloodPool(defender, isHeadshotKill)
                     })
                 end)
                 if not okScale then
-                    log(string.format("BLOOD POOL: スケール調整に失敗 %s", tostring(scaleError)))
+                    log(string.format("BLOOD POOL: ã‚¹ã‚±ãƒ¼ãƒ«èª¿æ•´ã«å¤±æ•— %s", tostring(scaleError)))
                 end
             end
         end)
@@ -2595,9 +2751,9 @@ local function getSoundLibraries()
         end)
         if ok and found and found:IsValid() then
             soundLibraries[#soundLibraries + 1] = { name = target.name, object = found }
-            log(string.format("VOICE: %s を取得しました", target.name))
+            log(string.format("VOICE: %s ã‚’å–å¾—ã—ã¾ã—ãŸ", target.name))
         else
-            log(string.format("VOICE: %s が見つかりません", target.name))
+            log(string.format("VOICE: %s ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“", target.name))
         end
     end
 
@@ -2648,7 +2804,7 @@ local function getHeadGoreSound()
     end)
     if ok and found and found:IsValid() then
         headGoreSound = found
-        log("SOUND: 効果音を取得しました(読み込み済み)")
+        log("SOUND: åŠ¹æžœéŸ³ã‚’å–å¾—ã—ã¾ã—ãŸ(èª­ã¿è¾¼ã¿æ¸ˆã¿)")
         return headGoreSound
     end
 
@@ -2661,12 +2817,12 @@ local function getHeadGoreSound()
         end)
         if okFind and again and again:IsValid() then
             headGoreSound = again
-            log("SOUND: 効果音を読み込みました")
+            log("SOUND: åŠ¹æžœéŸ³ã‚’èª­ã¿è¾¼ã¿ã¾ã—ãŸ")
             return headGoreSound
         end
     end
 
-    log(string.format("SOUND: 効果音が見つかりません %s", HEAD_GORE_SOUND_PATH))
+    log(string.format("SOUND: åŠ¹æžœéŸ³ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ %s", HEAD_GORE_SOUND_PATH))
     return nil
 end
 
@@ -2750,7 +2906,7 @@ local function silenceIfMarked(character, label)
 
     if not silenceHookLogged[label] then
         silenceHookLogged[label] = true
-        log(string.format("VOICE: %s で追い停止しました", label))
+        log(string.format("VOICE: %s ã§è¿½ã„åœæ­¢ã—ã¾ã—ãŸ", label))
     end
     silenceActorVoice(character)
 end
@@ -2791,6 +2947,12 @@ local function triggerHeadGoreEffect(defender, hitLocation)
             playHeadGoreSound(defender)
 
             hideHeadBone(defender)
+
+            if tryCallModActor(modActor, "SpawnHeadGoreAt", hitLocationSnapshot) then
+                logBpCapabilitiesOnce()
+                return
+            end
+            logBpCapabilitiesOnce()
 
             playHeadGoreEffect(modActor, defender, hitLocationSnapshot)
 
@@ -3075,7 +3237,8 @@ end
 StartPumpLoop()
 
 log("Loaded. Blood for human NPCs + pals. Decapitation: humans only.")
-log("Stability 1.0.5: fixed FX pump thrash; hit Niagara + neck geyser off (decals/pools/decap keep).")
+log("1.0.6: boss pals skipped (_BOSS); normal pals + humans keep FX. Hit Niagara/geyser still off.")
 log("Press Ctrl+F8 to scan loaded characters / class ancestry.")
 log("Blood spatter is active (backward toward the attacker, sticks to floors).")
 log("Do NOT load this alongside the original Blood Splatter mod.")
+

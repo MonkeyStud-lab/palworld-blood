@@ -44,6 +44,8 @@ Package name: `BloodSplatterBoth`
 
 Press **Ctrl+F8** in-game to dump loaded character class ancestry (human / pal / player) to `UE4SS.log`.
 
+Lua owns hit FX via deferred spawns + `BloodFX.pak` assets. Optional BP relay helpers are documented in `docs/BP_RELAY.md` if a ModActor is recooked later.
+
 ## Credits
 
 - Original Blood Splatter by [petyr1710](https://github.com/petyr1710/blood-splatter)
