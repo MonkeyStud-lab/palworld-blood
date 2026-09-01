@@ -1,4 +1,4 @@
-﻿local MOD_TAG = "[BloodSplatterBoth]"
+local MOD_TAG = "[BloodSplatterBoth]"
 
 local function log(message)
     print(string.format("%s %s\n", MOD_TAG, message))
